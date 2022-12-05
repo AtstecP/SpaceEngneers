@@ -35,8 +35,9 @@ namespace IngameScript
         
 
         const string cameraName = "Camera";
+        const string cameraLandingName = "CameraLanding";
         const string RemoteControlName = "RemCon";
-        const string TextPanel = "OWN LCD";
+        const string TextPanel = "LCD";
 
         List<IMyCockpit> Cockpits = new List<IMyCockpit>();
         IMyCockpit MainCockpit;
@@ -49,6 +50,7 @@ namespace IngameScript
         double MinPower;
 
         IMyCameraBlock cameraForRaycast; // https://spaceengineerswiki.com/IMyCameraBlock/ru
+        IMyCameraBlock cameraLandingForRaycast; // https://spaceengineerswiki.com/IMyCameraBlock/ru
         IMyRemoteControl remoteControl; // https://spaceengineerswiki.com/Remote_Control
         IMyTextPanel textPanel;
 
@@ -57,12 +59,16 @@ namespace IngameScript
 
         double CubeGridRadius;
 
-        Step step = Step.TakeDirectiont;
+        StepLanding stepLanding = StepLanding.Check;
+        StepFly stepFly = StepFly.TakeDirectiont;
         public Program()
-        {      
-            step = Step.TakeDirectiont;
+        {
+            stepLanding = StepLanding.Check;
+            stepFly = StepFly.TakeDirectiont;
             cameraForRaycast = GridTerminalSystem.GetBlockWithName(cameraName) as IMyCameraBlock;
+            cameraLandingForRaycast = GridTerminalSystem.GetBlockWithName(cameraLandingName) as IMyCameraBlock;
             cameraForRaycast.EnableRaycast = true;
+            cameraLandingForRaycast.EnableRaycast = true;
 
             remoteControl = GridTerminalSystem.GetBlockWithName(RemoteControlName) as IMyRemoteControl;
             remoteControl.FlightMode = FlightMode.OneWay;
@@ -139,7 +145,7 @@ namespace IngameScript
                         {
                             //textPanel.WriteText(vc.VectorToGPS(vec, $"R{Right.X} Up{Up.Y} - Летим сюда"), true);
                             //textPanel.WriteText("\n", true);
-                            FlyTo(vec, "New Diretion");
+                            FlyTo(vec);
                             return true;
                         }
                     }
@@ -171,8 +177,10 @@ namespace IngameScript
         }
 
 
-        private void FlyTo(Vector3D position, string waypointName = "AP Enabled")
+        private void FlyTo(Vector3D position, float speedLimit = 100, bool setCollision = true, string waypointName = "AP Enabled")
         {
+            remoteControl.SetCollisionAvoidance(setCollision);
+            remoteControl.SpeedLimit = speedLimit;
             remoteControl.ClearWaypoints();
             remoteControl.AddWaypoint(position, waypointName);
             remoteControl.SetAutoPilotEnabled(true);
@@ -189,7 +197,7 @@ namespace IngameScript
             return false;
         }
 
-        enum Step
+        enum StepFly
         {
             TakeDirectiont,
             CheckWay,
@@ -198,37 +206,170 @@ namespace IngameScript
         }
         public void Main_Fly(Vector3D argument)
         {
-            switch (step)
+            switch (stepFly)
             {
 
-                case Step.TakeDirectiont:
+                case StepFly.TakeDirectiont:
                     DestinationWaypoint = argument;
                     DestinationWaypoint.Z += 30;
-                    step = Step.CheckWay;
+                    stepFly = StepFly.CheckWay;
                     break;
-                case Step.ShipInPoint:
+                case StepFly.ShipInPoint:
                     if (ShipInProxyPoint(remoteControl.CurrentWaypoint.Coords))
                     {
-                        step = Step.CheckWay;
+                        stepFly = StepFly.CheckWay;
                     }
                     break;
-                case Step.CheckWay:
+                case StepFly.CheckWay:
                     if (!checkFreeWay(DestinationWaypoint))
                     {
-                        step = Step.ShipInPoint;
+                        stepFly = StepFly.ShipInPoint;
                     }
                     else if(ShipInProxyPoint(DestinationWaypoint))
                     {
-                        step = Step.Stop;
+                        stepFly = StepFly.Stop;
                         Runtime.UpdateFrequency = UpdateFrequency.Update1;
                         Run();
                     }
+                    //if (false)
+                    //{
+                    //    Runtime.UpdateFrequency = UpdateFrequency.Update10;
+                    //    landing();
+                    //}
                     break;
                 default:
                     break;
             }
         }
 
+        enum StepLanding
+        {
+            Stop,
+            Check,
+            Fly,
+        }
+        private void landing()
+        {
+            Echo("Landing");
+            switch (stepLanding)
+            {
+                case StepLanding.Check:
+                    int i = checkPalce(cameraLandingForRaycast);
+                    if (i != 1)
+                    {
+                        stepLanding = StepLanding.Stop;
+                    }
+                    else
+                    {
+                        Vector3D cord = remoteControl.GetPosition();
+                        cord.X += 3 * CubeGridRadius;
+                        FlyTo(vc.LocalToWorld(new Vector3D(3 * CubeGridRadius, 0, 0), remoteControl), 100, false);
+                        stepLanding = StepLanding.Fly;
+                    }
+                    break;
+                case StepLanding.Fly:
+                    var dist = (DestinationWaypoint - remoteControl.CubeGrid.GetPosition()).Length();
+                    if (dist > CubeGridRadius * 10)
+                    {
+                        remoteControl.SpeedLimit = 100;
+                    }
+                    else if (dist > CubeGridRadius * 5)
+                    {
+                        remoteControl.SpeedLimit = 20;
+                    }
+                    else
+                    {
+                        remoteControl.SpeedLimit = 1;
+                    }
+                    if (!remoteControl.IsAutoPilotEnabled)
+                    {
+                        stepLanding = StepLanding.Check;
+
+                    }
+                    break;
+                case StepLanding.Stop:
+                    {
+                        Echo("Stop Engine");
+                        break;
+                    }
+                default:
+                    break;
+            }
+        }
+
+        private int checkPalce(IMyCameraBlock camera)
+        {
+            Echo("checkPalce");
+            if (remoteControl.GetNaturalGravity().Length() == 0)
+                return 0;
+            double rad = Math.PI / 180;
+            var max = camera.RaycastConeLimit;
+            //Echo(max.ToString());
+            float i = 0;
+            float j = 0;
+            int direction = 0;// 0 - вправо, 1 - вверх, 2 - влево, 3 - вниз
+            //int sizeInMeters = sizeInPoints * (int)distanceBtwPoints;
+            Vector3D predNotEmptyDotHitPoint = cameraForRaycast.GetPosition();
+            double hight = 0;
+            do
+            {
+                // проверка на гравитацию 
+                //Echo(i.ToString()+"__"+j.ToString());
+                for (int k = 1; k <= (direction + 2) / 2; ++k)
+                {
+
+                    //var ray = camera.Raycast(CubeGridRadius,i,j);
+                    var ray = camera.Raycast(MainCockpit.GetPosition().Z, (float)(i), (float)(j));
+                    //Echo(CubeGridRadius.ToString()+"__");A
+                    //Echo(ray.IsEmpty().ToString());
+                    if (!ray.IsEmpty())//TODO: возможно нужнаa проверка что dot между локальными векторами положительный
+                    {
+                        //TODO: возможно нужно из набора точек выбрать с максимальной дальностью от HitPos
+
+                        //Проверка что расстояние от предидущего хитпоинта больше радиуса boundingBox грида
+                        //if ((predNotEmptyDotHitPoint - vec).Length() > CubeGridRadius * 5)
+                        //{
+                        //    //textPanel.WriteText(vc.VectorToGPS(vec, $"R{Right.X} Up{Up.Y} - Летим сюда"), true);
+                        //    //textPanel.WriteText("\n", true);
+                        //    FlyTo(vec, "New Diretion");
+                        //    return true;
+                        //}
+
+                        double hitHight = Vector3D.Distance(camera.GetPosition(), (Vector3D)ray.HitPosition) * Math.Cos(i * rad);
+                        Echo((hitHight - hight).ToString());
+                        //Echo(hight.ToString() + "-"+ (hight < hitHight).ToString() + "-" + hitHight.ToString());
+                        if ((i == 0) && (j == 0))
+                        {
+                            DestinationWaypoint = (Vector3D)ray.HitPosition;
+                        }
+                        if (((hight - hitHight) > 2) && (j != 0))
+                        {
+                            return 1;
+                        }
+                        hight = hitHight;
+                    }
+                    switch (direction % 4)
+                    {
+                        case 0:
+                            j += 1;//вправо
+                            break;
+                        case 1:
+                            i -= 1;//вверх
+                            break;
+                        case 2:
+                            j -= 1;//влево
+                            break;
+                        case 3:
+                            i += 1;//вниз
+                            break;
+                    }
+                }
+                ++direction;
+
+            } while (-max <= i && i <= max && -max <= j && j <= max);//пока не вышли за 
+            FlyTo(DestinationWaypoint, 1, false, "lanndPos");
+            return 2;
+        }
         public class VectorsCasting
         {
 
@@ -482,11 +623,13 @@ namespace IngameScript
                 switch (argument)
                 {
                     case "Stop":
+                        textPanel.WriteText("Stop");
                         stop();
                         waypoints = new List<WayPoint>();
                         break;
                     case "Pause":
-                        step = Step.Stop;
+                        textPanel.WriteText("Pause");
+                        stepFly = StepFly.Stop;
                         stop();
                         break;
                     case "":
@@ -502,7 +645,7 @@ namespace IngameScript
                             wayPointHome = waypoints.Find(x => x.Name.Contains(argument));
                             Runtime.UpdateFrequency = UpdateFrequency.Update10;
                             textPanel.WriteText($"Fly to {argument}\n");
-                            step = Step.TakeDirectiont;
+                            stepFly = StepFly.TakeDirectiont;
                             Main_Fly(wayPointHome.Position);
                         }
                         else
